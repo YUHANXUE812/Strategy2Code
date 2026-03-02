@@ -1,0 +1,7 @@
+# Python cache
+**/__pycache__/
+*.pyc
+
+# Strategy2Code runtime artifacts
+Strategy2Code codes/logs/
+Strategy2Code codes/outputs/

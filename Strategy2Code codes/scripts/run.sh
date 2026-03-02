@@ -9,7 +9,7 @@ exec > >(tee "$LOG_FILE") 2>&1
 echo "log is saved to：$LOG_FILE"
 
 
-GPT_VERSION="o3-mini"
+GPT_VERSION="o4-mini"
 
 # PAPER_NAME="Transformer"
 # PDF_PATH="../examples/Transformer.pdf" # .pdf
