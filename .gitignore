@@ -5,3 +5,6 @@
 # Strategy2Code runtime artifacts
 Strategy2Code codes/logs/
 Strategy2Code codes/outputs/
+
+# Agent runtime artifacts
+agent/sessions/
