@@ -20,7 +20,7 @@ import sys
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 
 def now_str() -> str:
@@ -58,6 +58,16 @@ def parse_kv_pairs(text: str) -> Dict[str, str]:
     return parsed
 
 
+def truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return False
+
+
 def guess_action(message: str) -> str:
     lower = message.lower()
     stripped = message.strip()
@@ -74,19 +84,49 @@ def guess_action(message: str) -> str:
         }
         return mapping.get(cmd, "help")
 
-    run_keys = ["run pipeline", "generate code", "reproduce", "build repo", "run the pipeline"]
-    eval_keys = ["evaluate", "score", "grade", "assess"]
-    verify_keys = ["verify", "validation", "pass verification", "does it run", "did it pass"]
-    explain_keys = ["explain", "what does this code do", "how to run", "describe this code"]
+    run_keys = [
+        "run pipeline",
+        "generate code",
+        "reproduce",
+        "build repo",
+        "run the pipeline",
+        "运行流程",
+        "运行pipeline",
+        "生成代码",
+    ]
+    eval_keys = ["evaluate", "score", "grade", "assess", "评估", "打分"]
+    verify_keys = [
+        "verify",
+        "validation",
+        "pass verification",
+        "does it run",
+        "did it pass",
+        "验证",
+        "通过验证",
+    ]
+    explain_keys = [
+        "explain",
+        "what does this code do",
+        "how to run",
+        "describe this code",
+        "解释",
+        "说明",
+    ]
+    status_keys = ["status", "current status", "状态", "当前状态"]
+    help_keys = ["help", "usage", "怎么用", "帮助"]
 
     if any(k in lower for k in run_keys):
         return "run_pipeline"
     if any(k in lower for k in eval_keys):
         return "evaluate"
     if any(k in lower for k in verify_keys):
-        return "status"
+        return "verify"
     if any(k in lower for k in explain_keys):
         return "explain"
+    if any(k in lower for k in status_keys):
+        return "status"
+    if any(k in lower for k in help_keys):
+        return "help"
     return "help"
 
 
@@ -143,6 +183,56 @@ class AgentResult:
             "metrics": self.metrics,
             "commands": self.commands,
             "errors": self.errors,
+        }
+
+
+@dataclass
+class PlanStep:
+    action: str
+    reason: str
+    required: bool = True
+    inserted_by_feedback: bool = False
+    attempt: int = 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "action": self.action,
+            "reason": self.reason,
+            "required": self.required,
+            "inserted_by_feedback": self.inserted_by_feedback,
+            "attempt": self.attempt,
+        }
+
+
+@dataclass
+class ExecutionPlan:
+    strategy: str
+    steps: List[PlanStep] = field(default_factory=list)
+
+    def add_step(
+        self,
+        action: str,
+        reason: str,
+        required: bool = True,
+        inserted_by_feedback: bool = False,
+        attempt: int = 0,
+    ) -> None:
+        if any(s.action == action for s in self.steps):
+            return
+        self.steps.append(
+            PlanStep(
+                action=action,
+                reason=reason,
+                required=required,
+                inserted_by_feedback=inserted_by_feedback,
+                attempt=attempt,
+            )
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "strategy": self.strategy,
+            "steps": [s.to_dict() for s in self.steps],
         }
 
 
@@ -237,6 +327,309 @@ class Strategy2CodeChatAgent:
             "stdout_log_path": record.stdout_log_path,
             "stderr_log_path": record.stderr_log_path,
         }
+
+    def _contains_any(self, text: str, keys: List[str]) -> bool:
+        return any(k in text for k in keys)
+
+    def _pipeline_followup_plan(self, message: str, payload: Dict[str, Any]) -> Dict[str, bool]:
+        lower = message.lower()
+        eval_keys = ["evaluate", "evaluation", "eval", "score", "grade", "assess"]
+        verify_keys = [
+            "verify",
+            "verification",
+            "validate",
+            "validation",
+            "did it pass",
+            "pass verification",
+        ]
+        explain_keys = [
+            "explain",
+            "explanation",
+            "describe",
+            "what does this code do",
+            "how to run",
+        ]
+
+        wants_eval = self._contains_any(lower, eval_keys)
+        wants_verify = self._contains_any(lower, verify_keys)
+        wants_explain = self._contains_any(lower, explain_keys)
+
+        auto_followup = truthy(payload.get("auto_followup")) or truthy(payload.get("run_followup"))
+        force_eval = truthy(payload.get("force_eval")) or truthy(payload.get("with_eval"))
+        skip_eval = truthy(payload.get("skip_eval"))
+
+        enabled = auto_followup or wants_eval or wants_verify or wants_explain
+        run_eval = (wants_eval or force_eval) and not skip_eval
+        run_explain = enabled
+
+        return {
+            "enabled": enabled,
+            "run_eval": run_eval,
+            "run_explain": run_explain,
+        }
+
+    def _intent_flags(
+        self,
+        message: str,
+        payload: Dict[str, Any],
+        base_action: str,
+    ) -> Dict[str, bool]:
+        lower = message.lower()
+        run_keys = [
+            "run pipeline",
+            "run the pipeline",
+            "generate code",
+            "reproduce",
+            "build repo",
+            "运行流程",
+            "运行pipeline",
+            "生成代码",
+        ]
+        eval_keys = ["evaluate", "evaluation", "eval", "score", "grade", "assess", "评估", "打分"]
+        verify_keys = [
+            "verify",
+            "verification",
+            "validate",
+            "validation",
+            "did it pass",
+            "pass verification",
+            "验证",
+            "通过验证",
+            "能跑",
+        ]
+        explain_keys = ["explain", "description", "what does this code do", "how to run", "解释", "说明"]
+        status_keys = ["status", "current status", "状态", "当前状态"]
+        help_keys = ["help", "usage", "怎么用", "帮助"]
+
+        flags = {
+            "run_pipeline": base_action == "run_pipeline" or self._contains_any(lower, run_keys),
+            "evaluate": base_action == "evaluate" or self._contains_any(lower, eval_keys),
+            "verify": base_action == "verify" or self._contains_any(lower, verify_keys),
+            "explain": base_action == "explain" or self._contains_any(lower, explain_keys),
+            "status": base_action == "status" or self._contains_any(lower, status_keys),
+            "help": base_action == "help" or self._contains_any(lower, help_keys),
+        }
+
+        # Keep compatibility with legacy payload toggles.
+        if truthy(payload.get("with_eval")) or truthy(payload.get("force_eval")):
+            flags["evaluate"] = True
+        if truthy(payload.get("auto_followup")) or truthy(payload.get("run_followup")):
+            flags["verify"] = True
+            flags["explain"] = True
+
+        return flags
+
+    def _build_execution_plan(
+        self,
+        message: str,
+        payload: Dict[str, Any],
+        base_action: str,
+    ) -> ExecutionPlan:
+        plan = ExecutionPlan(strategy="hybrid_plan_execute_feedback")
+        explicit_command = message.strip().startswith("/")
+        flags = self._intent_flags(message, payload, base_action)
+
+        if explicit_command and base_action in {"evaluate", "verify", "explain", "status", "help"}:
+            if base_action == "help":
+                plan.add_step("help", reason="Explicit /help command.")
+            else:
+                plan.add_step(base_action, reason=f"Explicit {base_action} command.")
+            return plan
+
+        if flags["run_pipeline"]:
+            plan.add_step("run_pipeline", reason="User asks to generate/reproduce code pipeline output.")
+            followup = self._pipeline_followup_plan(message, payload)
+            if followup.get("enabled", False):
+                plan.add_step("verify", reason="Follow-up health check after pipeline execution.")
+                if followup.get("run_eval", False):
+                    plan.add_step("evaluate", reason="User asks for quality scoring after verification.")
+                if followup.get("run_explain", False):
+                    plan.add_step("explain", reason="User asks for explanation/how-to-run summary.")
+            if flags["status"]:
+                plan.add_step("status", reason="User explicitly asks for current status summary.")
+            return plan
+
+        if flags["verify"]:
+            plan.add_step("verify", reason="User asks verification/execution-pass status.")
+        if flags["evaluate"]:
+            if not any(step.action == "verify" for step in plan.steps):
+                plan.add_step(
+                    "verify",
+                    reason="Run verification first to provide stronger context before evaluation.",
+                    required=False,
+                )
+            plan.add_step("evaluate", reason="User asks for evaluation/score.")
+        if flags["explain"]:
+            plan.add_step("explain", reason="User asks for code explanation/how-to-run.")
+        if flags["status"]:
+            plan.add_step("status", reason="User asks for current summarized status.")
+
+        if not plan.steps:
+            plan.add_step("help", reason="No clear executable intent detected.")
+        return plan
+
+    def _prepare_step_payload(self, payload: Dict[str, Any], action: str) -> Dict[str, Any]:
+        merged = dict(payload)
+        ctx = self._resolve_context(merged)
+
+        if action in {"verify", "explain", "status"}:
+            if not merged.get("target_repo_dir") and ctx.get("output_repo_dir"):
+                merged["target_repo_dir"] = ctx["output_repo_dir"]
+
+        if action == "evaluate":
+            if not merged.get("paper_name") and ctx.get("paper_name"):
+                merged["paper_name"] = ctx["paper_name"]
+            if not merged.get("paper_json_path"):
+                paper_json = ctx.get("paper_json_path") or ctx.get("paper_json_cleaned_path")
+                if paper_json:
+                    merged["paper_json_path"] = paper_json
+            if not merged.get("output_dir") and ctx.get("output_dir"):
+                merged["output_dir"] = ctx["output_dir"]
+            if not merged.get("output_repo_dir") and ctx.get("output_repo_dir"):
+                merged["output_repo_dir"] = ctx["output_repo_dir"]
+
+        return merged
+
+    def _dispatch_action(self, action: str, request: str, payload: Dict[str, Any]) -> AgentResult:
+        handlers: Dict[str, Callable[[str, Dict[str, Any]], AgentResult]] = {
+            "run_pipeline": self._run_pipeline,
+            "evaluate": self._evaluate,
+            "verify": self._verify,
+            "explain": self._explain,
+            "status": self._status,
+        }
+        if action == "help":
+            return self._help(request)
+        handler = handlers.get(action)
+        if handler is None:
+            return self._help(request)
+        return handler(request, payload)
+
+    def _feedback_replan(
+        self,
+        plan: ExecutionPlan,
+        step_idx: int,
+        step: PlanStep,
+        result: AgentResult,
+        payload: Dict[str, Any],
+    ) -> bool:
+        if result.status == "success":
+            return False
+        if step.attempt >= 1:
+            return False
+
+        err_set = set(result.errors)
+        ctx = self._resolve_context(payload)
+        has_run_context = bool(
+            (ctx.get("paper_name")) and (ctx.get("paper_json_path") or ctx.get("paper_json_cleaned_path"))
+        )
+
+        if "missing_target_repo_dir" in err_set and step.action in {"verify", "explain", "status"} and has_run_context:
+            recovery = PlanStep(
+                action="run_pipeline",
+                reason=f"Feedback recovery: `{step.action}` needs repo context, run pipeline first.",
+                required=True,
+                inserted_by_feedback=True,
+                attempt=step.attempt + 1,
+            )
+            retry = PlanStep(
+                action=step.action,
+                reason=f"Retry `{step.action}` after recovery pipeline run.",
+                required=step.required,
+                inserted_by_feedback=True,
+                attempt=step.attempt + 1,
+            )
+            plan.steps[step_idx : step_idx + 1] = [recovery, retry]
+            return True
+
+        if "missing_required_fields" in err_set and step.action == "evaluate" and has_run_context:
+            recovery = PlanStep(
+                action="run_pipeline",
+                reason="Feedback recovery: evaluation requires missing paper context.",
+                required=True,
+                inserted_by_feedback=True,
+                attempt=step.attempt + 1,
+            )
+            retry = PlanStep(
+                action="evaluate",
+                reason="Retry evaluation after context recovery.",
+                required=step.required,
+                inserted_by_feedback=True,
+                attempt=step.attempt + 1,
+            )
+            plan.steps[step_idx : step_idx + 1] = [recovery, retry]
+            return True
+
+        return False
+
+    def _execute_plan(self, request: str, payload: Dict[str, Any], plan: ExecutionPlan) -> AgentResult:
+        answer_lines = [f"Plan strategy: {plan.strategy}"]
+        commands: List[Dict[str, Any]] = []
+        errors: List[str] = []
+        metrics: Dict[str, Any] = {}
+        artifacts: Dict[str, Any] = {"plan": plan.to_dict(), "step_results": []}
+
+        overall_status = "success"
+        max_step_budget = max(10, len(plan.steps) * 3)
+        step_idx = 0
+
+        while step_idx < len(plan.steps):
+            if step_idx >= max_step_budget:
+                overall_status = "error"
+                errors.append("planner_step_budget_exceeded")
+                answer_lines.append("Planner stopped: step budget exceeded.")
+                break
+
+            step = plan.steps[step_idx]
+            step_payload = self._prepare_step_payload(payload, step.action)
+            step_result = self._dispatch_action(step.action, request, step_payload)
+
+            commands.extend(step_result.commands)
+            errors.extend(step_result.errors)
+            if step_result.metrics:
+                metrics.update(step_result.metrics)
+            if step_result.artifacts:
+                artifacts.update(step_result.artifacts)
+
+            artifacts["step_results"].append(
+                {
+                    "step_index": step_idx,
+                    "step": step.to_dict(),
+                    "status": step_result.status,
+                    "errors": step_result.errors,
+                    "answer": step_result.answer,
+                }
+            )
+            answer_lines.append(f"{step.action}: {step_result.answer}")
+
+            if step_result.status != "success":
+                replanned = self._feedback_replan(plan, step_idx, step, step_result, step_payload)
+                if replanned:
+                    artifacts["plan"] = plan.to_dict()
+                    answer_lines.append(f"Feedback: replanned after `{step.action}` failure.")
+                    continue
+                if step.required:
+                    overall_status = "error"
+                    break
+
+            step_idx += 1
+
+        if not artifacts.get("step_results"):
+            overall_status = "error"
+            errors.append("no_step_executed")
+
+        final_action = "plan_execute" if len(plan.steps) > 1 else plan.steps[0].action
+        dedup_errors = sorted(set(errors))
+        return AgentResult(
+            request=request,
+            action=final_action,
+            status=overall_status,
+            answer="\n".join(answer_lines),
+            artifacts=artifacts,
+            metrics=metrics,
+            commands=commands,
+            errors=dedup_errors,
+        )
 
     def _run_pipeline(self, request: str, payload: Dict[str, Any]) -> AgentResult:
         ctx = self._resolve_context(payload)
@@ -644,7 +1037,7 @@ class Strategy2CodeChatAgent:
 
     def handle_message(self, message: str) -> AgentResult:
         self.turn_idx += 1
-        action = guess_action(message)
+        base_action = guess_action(message)
         payload = self._collect_payload(message)
 
         if message.strip().startswith("/"):
@@ -652,18 +1045,8 @@ class Strategy2CodeChatAgent:
             if len(parts) > 1:
                 payload = {**parse_kv_pairs(parts[1]), **extract_json_object(parts[1]), **payload}
 
-        if action == "run_pipeline":
-            result = self._run_pipeline(message, payload)
-        elif action == "evaluate":
-            result = self._evaluate(message, payload)
-        elif action == "verify":
-            result = self._verify(message, payload)
-        elif action == "explain":
-            result = self._explain(message, payload)
-        elif action == "status":
-            result = self._status(message, payload)
-        else:
-            result = self._help(message)
+        exec_plan = self._build_execution_plan(message, payload, base_action)
+        result = self._execute_plan(message, payload, exec_plan)
 
         self._save_turn_result(result)
         return result
