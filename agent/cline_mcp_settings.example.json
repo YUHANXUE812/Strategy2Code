@@ -1,0 +1,22 @@
+{
+  "mcpServers": {
+    "strategy2code": {
+      "command": "conda",
+      "args": [
+        "run",
+        "-n",
+        "mcp-demo",
+        "--no-capture-output",
+        "mcp",
+        "run",
+        "/home/user/Strategy2Code/agent/mcp_server.py"
+      ],
+      "cwd": "/home/user/Strategy2Code",
+      "env": {
+        "OPENAI_API_KEY": "${env:OPENAI_API_KEY}",
+        "STRATEGY2CODE_REPO_ROOT": "/home/user/Strategy2Code",
+        "MCP_TRANSPORT": "stdio"
+      }
+    }
+  }
+}
