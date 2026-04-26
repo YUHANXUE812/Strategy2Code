@@ -116,11 +116,11 @@ All tools return the same output object shape:
   "cline.mcpServers": {
     "strategy2code": {
       "command": "python",
-      "args": ["/home/xyh812/Strategy2Code/agent/mcp_server.py"],
-      "cwd": "/home/xyh812/Strategy2Code",
+      "args": ["/home/username/Strategy2Code/agent/mcp_server.py"],
+      "cwd": "/home/username/Strategy2Code",
       "env": {
         "OPENAI_API_KEY": "${env:OPENAI_API_KEY}",
-        "STRATEGY2CODE_REPO_ROOT": "/home/xyh812/Strategy2Code",
+        "STRATEGY2CODE_REPO_ROOT": "/home/username/Strategy2Code",
         "MCP_TRANSPORT": "stdio"
       }
     }
